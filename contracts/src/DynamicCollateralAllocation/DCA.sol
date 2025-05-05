@@ -7,16 +7,15 @@ import "openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "openzeppelin/contracts/token/ERC721/extensions/IERC721Metadata.sol";
+import {AutomationCompatibleInterface} from "contracts/lib/chainlink-brownie-contracts/contracts/src/v0.8/interfaces/AutomationCompatibleInterface.sol";
 
 /**
  * @title Dynamic Collateral Optimizer
  * @notice Automatically manages and optimizes collateral positions in Bold Protocol
  * @dev Integrates with Bold Protocol to rebalance collateral for optimal yield and safety
  */
-
     // ============ Interfaces ============
-    // Bold Protocol interfaces
-
+    // @notice - using interfaces directly instead of importing for making it compatible with remix as well.
     interface ITroveNFT is IERC721Metadata {
         function mint(address _owner, uint256 _troveId) external;
         function burn(uint256 _troveId) external;
@@ -103,10 +102,6 @@ import "openzeppelin/contracts/token/ERC721/extensions/IERC721Metadata.sol";
 contract DynamicCollateralOptimizer is Ownable(msg.sender), ReentrancyGuard {
     using SafeERC20 for IERC20;
 
-
-
-    // ============ Structs ============
-
     struct OptimizationStrategy {
         uint256 targetLTV;          // Target Loan-to-Value ratio (in bps, e.g. 7000 = 70%)
         uint256 riskTolerance;      // 1-10 scale of risk preference
@@ -138,14 +133,12 @@ contract DynamicCollateralOptimizer is Ownable(msg.sender), ReentrancyGuard {
         uint256 minAmountOut;
     }
 
-    // ============ Constants ============
-
     uint256 public constant BASIS_POINTS = 10000; // 100% in basis points
     uint256 public constant MIN_REBALANCE_THRESHOLD = 50; // 0.5% minimum threshold
     uint256 public constant SAFETY_MARGIN = 500; // 5% safety margin above MCR
     uint256 public constant MCR = 11000; // 110% Minimum Collateralization Ratio in bps
 
-    // ============ Storage Variables ============
+    uint32 public lastCalled_global; // Last time the optimizer function is called.
 
     IAddressesRegistry public registry;
     ITroveManager public troveManager;
@@ -223,6 +216,26 @@ contract DynamicCollateralOptimizer is Ownable(msg.sender), ReentrancyGuard {
             "DCO: Too soon to rebalance"
         );
         _;
+    }
+
+    // ============ Chainlink Automation ============
+    function checkUpkeep(
+        bytes calldata /* checkData */
+    )
+        external
+        view
+        returns (bool upkeepNeeded, bytes memory /* performData */)
+    {
+        // @notice - currently, it's been set to 1 hour, though the idea is make to dynamic, may be in future.
+        upkeepNeeded = (block.timestamp - lastCalled_global) >= 1 hours;
+    }
+
+    // TODO : need to figure out how to pass all the troves, either need to create new manager
+    // contract or need to modify optmizeCollateral function to accept multiple trove ids.
+    function performUpkeep(bytes calldata /* performData */, uint256 _troveId) external {
+        if ((block.timestamp - lastCalled_global) > 1 hours) {
+            optimizeCollateral(_troveId);
+        }
     }
 
     // ============ User Strategy Management ============
@@ -312,12 +325,13 @@ contract DynamicCollateralOptimizer is Ownable(msg.sender), ReentrancyGuard {
      * @param _troveId The ID of the trove to optimize
      */
     function optimizeCollateral(uint256 _troveId) 
-        external 
-        onlyTroveOwner(_troveId) 
+        public 
         whenNotShutdown
         validRebalanceTiming
         nonReentrant 
     {
+
+        lastCalled_global = uint32(block.timestamp);
         address user = troveToUser[_troveId];
         require(user != address(0), "DCO: Trove not registered");
         
@@ -686,14 +700,5 @@ contract DynamicCollateralOptimizer is Ownable(msg.sender), ReentrancyGuard {
         troveManager = ITroveManager(registry.troveManager());
         borrowerOperations = IBorrowerOperations(registry.borrowerOperations());
         priceFeed = IPriceFeed(registry.priceFeed());
-    }
-
-    /**
-     * @notice Rescues tokens accidentally sent to the contract
-     * @param _token The token to rescue
-     * @param _amount Amount to rescue
-     */
-    function rescueToken(address _token, uint256 _amount) external onlyOwner {
-        IERC20(_token).safeTransfer(owner(), _amount);
     }
 }
